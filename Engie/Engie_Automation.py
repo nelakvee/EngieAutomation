@@ -1,318 +1,238 @@
 import re
 import time
+import os
+import sys
+import logging
 import openpyxl
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException, \
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
     InvalidElementStateException
+)
 
+# =============================================================================
+# Configurations & Constants
+# =============================================================================
+EXCEL_FILE_PATH = r'C:/Users/nelakve/Documents/Field Engineers/Engine_Site_ID_and_Vendor.xlsx'
+ENGIE_LOGIN_URL = 'https://engieimpact.okta.com/'
+ENGIE_APP_TITLE = 'ENGIE Impact Platform'
+IOP_LOGIN_URL = 'https://iop.vh.vzwnet.com/user/nelakve/sites'
+ENGIE_USERNAME = 'veenith.nelakanti@verizonwireless.com'
+IOP_USERNAME   = 'nelakve'
+IOP_PASSWORD   = 'Vamshin143@'
+SHORT_TIMEOUT  = 30
+LONG_TIMEOUT   = 90
 
-# --- Helper Function to Normalize Vendor Names ---
-# This function cleans up vendor names for easier comparison.
-def normalize_vendor_name(name):
+# Directory for screenshots on error
+SCREENSHOT_DIR = os.path.join(os.getcwd(), 'screenshots')
+if not os.path.exists(SCREENSHOT_DIR):
+    os.makedirs(SCREENSHOT_DIR)
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+def normalize_vendor_name(name: str) -> str:
     """
-    Removes special characters and extra spaces from a name, and converts to lowercase.
-    This helps in comparing vendor names that might have slight variations.
-    Example: 'National Grid - New York/371376' becomes 'national grid new york'.
+    Remove non-alphanumeric, lowercase, collapse whitespace.
     """
     if not isinstance(name, str):
-        return ""
-    # Keep letters and numbers for a slightly more specific match if needed later
-    cleaned_name = re.sub(r'[^a-zA-Z0-9\s]', '', name).lower()
-    return ' '.join(cleaned_name.split())
+        return ''
+    cleaned = re.sub(r'[^a-zA-Z0-9\s]', '', name).lower()
+    return ' '.join(cleaned.split())
 
 
-# --- Configuration ---
-# Store credentials and file paths here for easy access.
-# IMPORTANT: For security, avoid hardcoding credentials. Consider environment variables or a secure config file.
-EXCEL_FILE_PATH = r'C:\Users\nelakve\Documents\Field Engineers\Engine_Site_ID_and_Vendor.xlsx'
-ENGIE_LOGIN_URL = 'https://engieimpact.okta.com/'
-ENGIE_USERNAME = 'veenith.nelakanti@verizonwireless.com'
-IOP_LOGIN_URL = "https://iop.vh.vzwnet.com/user/nelakve/sites"
-IOP_USERNAME = "nelakve"
-IOP_PASSWORD = "Vamshin143@"  # Note: Storing passwords in plain text is not secure.
-SCREENSHOT_FILE = "automation_error_screenshot.png"
-
-
-# --- Main Automation Function ---
-def run_automation():
+def take_screenshot(driver, site_id: str, step: str) -> None:
     """
-    Main function to orchestrate the entire automation process.
+    Save screenshot for debugging.
     """
-    # --- 1. Excel Setup ---
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    filename = f"error_{site_id}_{step}_{timestamp}.png"
+    path = os.path.join(SCREENSHOT_DIR, filename)
     try:
-        wb = openpyxl.load_workbook(EXCEL_FILE_PATH)
+        driver.save_screenshot(path)
+        logger.info(f"Screenshot saved: {path}")
+    except Exception as e:
+        logger.error(f"Failed to save screenshot: {e}")
+
+
+def load_sites_from_excel(path: str) -> list:
+    """
+    Read Excel and return list of (site_id, vendor).
+    """
+    try:
+        wb = openpyxl.load_workbook(path)
         ws = wb.active
-        # Read all sites into a list of dictionaries for processing
-        sites_to_process = []
-        # Start from row 2 to skip header
-        for row in ws.iter_rows(min_row=2, max_col=2, values_only=True):
-            site_id_val, vendor_name_val = row
-            if site_id_val:  # Process only if a Site ID exists
-                site_id = str(site_id_val).strip()
-                vendor_name = str(vendor_name_val).strip() if vendor_name_val else "Not Found"
-                sites_to_process.append({"site_id": site_id, "vendor_name": vendor_name})
-
-        if not sites_to_process:
-            print("❌ No sites found to process in the Excel file. Exiting.")
-            return
-
-    except FileNotFoundError:
-        print(f"❌ FATAL ERROR: The Excel file was not found at '{EXCEL_FILE_PATH}'.")
-        return
+        return [
+            (str(r[0]).strip(), str(r[1]).strip() if r[1] else '')
+            for r in ws.iter_rows(min_row=2, max_col=2, values_only=True)
+            if r[0]
+        ]
     except Exception as e:
-        print(f"❌ FATAL ERROR: Could not read the Excel file. Reason: {e}")
-        return
+        logger.error(f"Error loading Excel: {e}")
+        sys.exit(1)
 
-    # --- 2. WebDriver Setup ---
-    # The driver is set up once and used for the entire session.
-    driver = webdriver.Chrome()
-    long_wait = WebDriverWait(driver, 90)  # Increased wait time for very slow pages
-    short_wait = WebDriverWait(driver, 30)
-    driver.maximize_window()
+# =============================================================================
+# Main Automation Class
+# =============================================================================
+class EngieIOPAutomator:
+    def __init__(self, sites):
+        self.sites = sites
+        self.driver = None
+        self.wait_short = None
+        self.wait_long = None
+        self.engie_handle = None
+        self.iop_handle = None
 
-    try:
-        # --- 3. Initial Login to ENGIE ---
-        print("--- Starting ENGIE Platform Automation ---")
-        driver.get(ENGIE_LOGIN_URL)
-        short_wait.until(EC.presence_of_element_located((By.ID, 'idp-discovery-username'))).send_keys(ENGIE_USERNAME)
-        short_wait.until(EC.element_to_be_clickable((By.ID, 'idp-discovery-submit'))).click()
+    def setup_driver(self):
+        options = webdriver.ChromeOptions()
+        options.add_argument('--start-maximized')
+        self.driver = webdriver.Chrome(options=options)
+        self.wait_short = WebDriverWait(self.driver, SHORT_TIMEOUT)
+        self.wait_long  = WebDriverWait(self.driver, LONG_TIMEOUT)
 
-        print("\n>>> ACTION REQUIRED: Please complete the sign-in process for ENGIE in the browser.")
-        input(">>> After you have successfully signed in, press Enter here to continue...")
+    def login_engie(self):
+        # Load Okta and start login
+        self.driver.get(ENGIE_LOGIN_URL)
+        self.wait_short.until(
+            EC.visibility_of_element_located((By.ID, 'idp-discovery-username'))
+        ).send_keys(ENGIE_USERNAME)
+        self.wait_short.until(
+            EC.element_to_be_clickable((By.ID, 'idp-discovery-submit'))
+        ).click()
+        input("Complete Okta login and press Enter...")
 
-        print("Waiting for the ENGIE application dashboard to load...")
-        platform_button = long_wait.until(
+        # Launch ENGIE Impact Platform
+        tile = self.wait_long.until(
             EC.element_to_be_clickable(
-                (By.XPATH, "//span[@data-se='app-card-title' and @title='ENGIE Impact Platform']"))
+                (By.XPATH, f"//span[@data-se='app-card-title' and @title='{ENGIE_APP_TITLE}']")
+            )
         )
-        platform_button.click()
-        print("✅ Successfully clicked the ENGIE Impact Platform button.")
+        tile.click()
+        self.wait_long.until(EC.number_of_windows_to_be(2))
 
-        print("Switching to the new platform tab...")
-        long_wait.until(EC.number_of_windows_to_be(2))
-        driver.switch_to.window(driver.window_handles[1])
-        engie_main_tab_handle = driver.current_window_handle
+        # Close original tab, keep only ENGIE
+        handles = self.driver.window_handles
+        old = handles[0]
+        new = handles[-1]
+        self.driver.switch_to.window(old)
+        self.driver.close()
+        self.driver.switch_to.window(new)
+        self.engie_handle = new
+        logger.info("Switched to ENGIE Impact Platform tab.")
 
-        # --- 4. ONE-TIME LOGIN TO IOP ---
-        print("\n--- Performing one-time login to IOP Website ---")
-        driver.execute_script("window.open('');")
-        driver.switch_to.window(driver.window_handles[-1])
-        iop_tab_handle = driver.current_window_handle  # Store the IOP tab handle
+    def login_iop(self):
+        # Open and login to IOP
+        self.driver.execute_script("window.open('');")
+        handles = self.driver.window_handles
+        self.iop_handle = handles[-1]
+        self.driver.switch_to.window(self.iop_handle)
+        self.driver.get(IOP_LOGIN_URL)
+        self.wait_short.until(
+            EC.visibility_of_element_located((By.ID, 'idToken1'))
+        ).send_keys(IOP_USERNAME)
+        self.wait_short.until(
+            EC.visibility_of_element_located((By.ID, 'idToken2'))
+        ).send_keys(IOP_PASSWORD)
+        self.wait_short.until(
+            EC.element_to_be_clickable((By.ID, 'loginButton_0'))
+        ).click()
+        logger.info("Logged into IOP.")
 
-        driver.get(IOP_LOGIN_URL)
-        print(f"Navigated to: {IOP_LOGIN_URL}")
+    def process_site(self, index, site_id, vendor):
+        logger.info(f"{index}/{len(self.sites)} - Processing {site_id} ({vendor})")
+        try:
+            # Switch to ENGIE details/search page
+            self.driver.switch_to.window(self.engie_handle)
 
-        print("Waiting for IOP login fields...")
-        short_wait.until(EC.presence_of_element_located((By.ID, 'idToken1'))).send_keys(IOP_USERNAME)
-        short_wait.until(EC.presence_of_element_located((By.ID, 'idToken2'))).send_keys(IOP_PASSWORD)
-        short_wait.until(EC.element_to_be_clickable((By.ID, "loginButton_0"))).click()
-        print("✅ IOP login submitted. This tab will be reused.")
+            # Perform search on Bill Details page
+            search_box = self.wait_long.until(
+                EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, "input.search-box[placeholder='Search']")
+                )
+            )
+            self.driver.execute_script("arguments[0].value=''", search_box)
+            search_box.send_keys(site_id)
+            self.driver.find_element(By.CSS_SELECTOR, "i.fa-magnifying-glass").click()
 
-        # --- 5. Loop Through Each Site from Excel ---
-        for i, site_data in enumerate(sites_to_process):
-            site_id = site_data["site_id"]
-            vendor_name = site_data["vendor_name"]
-            normalized_vendor_from_excel = normalize_vendor_name(vendor_name)
+            # Extract fields
+            self.wait_long.until(
+                EC.visibility_of_element_located((By.ID, 'id-uem-bill-details-vendor-name'))
+            )
+            power_company = self.driver.find_element(By.ID, 'id-uem-bill-details-vendor-name')
+            power_company = power_company.text.split('/')[0].strip()
 
-            print("\n" + "=" * 50)
-            print(f"Processing Site {i + 1}/{len(sites_to_process)}: Site ID '{site_id}', Vendor '{vendor_name}'")
-            print("=" * 50)
+            account_number = self.driver.find_element(By.ID, 'id-uem-bill-details-acct-number').text.strip()
+            power_meter = self.driver.find_element(
+                By.CSS_SELECTOR, 'td.uem-bill-details-meter-number-widthSet'
+            ).text.strip()
 
-            try:
-                # --- 5a. ENGIE SEARCH ---
-                driver.switch_to.window(engie_main_tab_handle)
-                print("Refreshing ENGIE page for a clean search...")
-                driver.refresh()
+            print(f"Site {site_id} -> Company: {power_company}, Account: {account_number}, Meter: {power_meter}")
 
-                loading_overlay_xpath = "//div[contains(@class, 'ui-widget-overlay')]"
-                print("Waiting for ENGIE page to become fully interactive...")
-                long_wait.until(EC.invisibility_of_element_located((By.XPATH, loading_overlay_xpath)))
-                print("ENGIE page is now interactive.")
+            # Switch to IOP and enter
+            self.driver.switch_to.window(self.iop_handle)
+            io_search = self.wait_long.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "input[placeholder='Site/Switch Search']"))
+            )
+            io_search.clear()
+            io_search.send_keys(site_id)
+            time.sleep(1)
+            self.wait_long.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, 'a.dropdown-item'))
+            ).click()
 
-                search_field_xpath = "//input[@placeholder='Search' and contains(@class, 'search-box')]"
+            # Expand Utility Info and fill
+            header = self.wait_long.until(
+                EC.element_to_be_clickable((By.XPATH, "//span[text()='Utility Info']/.."))
+            )
+            self.driver.execute_script("arguments[0].scrollIntoView(true)", header)
+            header.click()
 
-                max_retries = 4
-                for attempt in range(max_retries):
-                    try:
-                        print(f"Attempting to interact with ENGIE search box (Attempt {attempt + 1}/{max_retries})...")
-                        search_field = long_wait.until(EC.element_to_be_clickable((By.XPATH, search_field_xpath)))
-                        driver.execute_script("arguments[0].value = '';", search_field)
-                        for char in site_id:
-                            search_field.send_keys(char)
-                            time.sleep(0.05)
-                        print(f"✅ Successfully entered Site ID '{site_id}' into ENGIE search.")
-                        break
-                    except (InvalidElementStateException, StaleElementReferenceException) as e:
-                        print(
-                            f"  - Encountered a temporary page instability ({type(e).__name__}). Retrying in 3 seconds...")
-                        time.sleep(3)
-                        if attempt == max_retries - 1: raise Exception(
-                            "Failed to interact with ENGIE search box after multiple retries.")
+            self.wait_short.until(
+                EC.element_to_be_clickable((By.XPATH, "//label[text()='Power Company']/following-sibling::input"))
+            ).send_keys(power_company)
+            self.driver.find_element(
+                By.XPATH, "//label[text()='Power Meter']/following-sibling::input"
+            ).send_keys(power_meter)
+            self.driver.find_element(
+                By.XPATH, "//label[text()='Account Number']/following-sibling::input"
+            ).send_keys(account_number)
 
-                print("Waiting for ENGIE search button to become enabled...")
-                enabled_search_button_xpath = "//button[contains(@class, 'search-btn-enabled')]"
-                search_button = long_wait.until(EC.element_to_be_clickable((By.XPATH, enabled_search_button_xpath)))
-                driver.execute_script("arguments[0].click();", search_button)
-                print("✅ Search button clicked on ENGIE.")
+            self.wait_short.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[text()='Save Utility Information']"))
+            ).click()
+            time.sleep(2)
 
-                # --- 5b. Find Bill on ENGIE and Extract Data ---
-                print("Searching for bill with a matching Vendor Name...")
-                bill_grid_xpath = "//table[contains(@id, 'BillResultsGrid')]"
-                long_wait.until(EC.presence_of_element_located((By.XPATH, bill_grid_xpath)))
-                bill_rows_xpath = f"{bill_grid_xpath}//tr[.//a[contains(@id, 'VendorName')]]"
-                long_wait.until(EC.presence_of_element_located((By.XPATH, bill_rows_xpath)))
-                bill_rows = driver.find_elements(By.XPATH, bill_rows_xpath)
+        except Exception as err:
+            logger.error(f"Error on site {site_id}: {err}")
+            take_screenshot(self.driver, site_id, 'process_site')
 
-                power_company = ""
-                account_number = ""
-                power_meter = ""
-                found_engie_match = False
+    def run(self):
+        try:
+            self.setup_driver()
+            self.login_engie()
+            self.login_iop()
+            for idx, (sid, vend) in enumerate(self.sites, 1):
+                self.process_site(idx, sid, vend)
+        finally:
+            if self.driver:
+                self.driver.quit()
+            logger.info("Automation complete.")
 
-                for row in bill_rows:
-                    try:
-                        vendor_name_element = row.find_element(By.XPATH, ".//a[contains(@id, 'VendorName')]")
-                        if normalized_vendor_from_excel in normalize_vendor_name(vendor_name_element.text):
-                            print(f"✅ Match found on ENGIE platform!")
-
-                            # Get the current window handles BEFORE clicking
-                            initial_windows = set(driver.window_handles)
-
-                            view_button = row.find_element(By.XPATH, ".//a[text()='View...']")
-                            driver.execute_script("arguments[0].click();", view_button)
-
-                            # --- FINAL FIX: Most robust new tab and data extraction logic ---
-                            print("Waiting for the new bill details tab to open...")
-                            long_wait.until(EC.new_window_is_opened(initial_windows))
-
-                            new_window_handle = (set(driver.window_handles) - initial_windows).pop()
-                            driver.switch_to.window(new_window_handle)
-                            print("✅ Switched to bill details tab.")
-
-                            try:
-                                print("Waiting for the bill details content frame to be available...")
-                                content_frame_xpath = "//iframe[contains(@id, 'iframe') or contains(@name, 'iframe') or @title='content']"
-                                long_wait.until(
-                                    EC.frame_to_be_available_and_switch_to_it((By.XPATH, content_frame_xpath)))
-                                print("✅ Successfully switched into the content frame.")
-
-                                print("Waiting for content inside the frame to load...")
-                                key_element_id = 'id-uem-bill-details-vendor-name'
-                                long_wait.until(EC.visibility_of_element_located((By.ID, key_element_id)))
-                                print("✅ Content inside frame has loaded. Extracting data...")
-
-                                power_company_span = driver.find_element(By.ID, 'id-uem-bill-details-vendor-name')
-                                power_company = power_company_span.text.split('/')[0].strip()
-
-                                account_number_span = driver.find_element(By.ID, 'id-uem-bill-details-acct-number')
-                                account_number = account_number_span.text.strip()
-
-                                meter_number_td = driver.find_element(By.XPATH,
-                                                                      "//td[@class='uem-bill-details-meter-number-widthSet wrapword']")
-                                power_meter = meter_number_td.text.strip()
-
-                                print("\n--- Extracted Data from ENGIE (Proof) ---")
-                                print(
-                                    f"  - Power Company: {power_company}\n  - Account Number: {account_number}\n  - Power Meter: {power_meter}")
-
-                            finally:
-                                driver.switch_to.default_content()
-                                print("Switched back to the main page content.")
-
-                            print("\nClosing the bill details tab.")
-                            driver.close()
-                            found_engie_match = True
-                            break
-                    except (NoSuchElementException, StaleElementReferenceException):
-                        continue
-
-                if not found_engie_match:
-                    print(f"❌ No matching bill found on ENGIE for vendor '{vendor_name}'. Skipping to next site.")
-                    continue
-
-                # --- 5c. Re-use IOP Tab and Enter Data ---
-                print("\n--- Switching to existing IOP Tab for data entry ---")
-                driver.switch_to.window(iop_tab_handle)
-
-                print(f"Waiting for IOP search field and entering Site ID: {site_id}")
-                iop_search_input = long_wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//input[contains(@placeholder, 'Site/Switch Search')]")))
-                iop_search_input.clear()
-                iop_search_input.send_keys(site_id)
-                time.sleep(1)
-
-                print("Waiting for search result dropdown on IOP...")
-                dropdown_result_xpath = "//a[@class='dropdown-item']"
-                dropdown_result = long_wait.until(EC.element_to_be_clickable((By.XPATH, dropdown_result_xpath)))
-                print("Clicking on the site from the dropdown...")
-                dropdown_result.click()
-
-                print("Waiting for 'fuze Utility Info' section to load...")
-                utility_info_xpath = "//div[contains(@class, 'tmET65dnMPIvRdTilZcA') and .//span[contains(text(), 'Utility Info')]]"
-                utility_info_header = long_wait.until(EC.presence_of_element_located((By.XPATH, utility_info_xpath)))
-
-                print("Scrolling to and expanding 'fuze Utility Info' section...")
-                driver.execute_script("arguments[0].scrollIntoView(true);", utility_info_header)
-                time.sleep(1)
-                utility_info_header.click()
-
-                print("Entering extracted data into IOP fields...")
-                power_company_input = short_wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//label[text()='Power Company']/following-sibling::input")))
-                power_company_input.clear()
-                power_company_input.send_keys(power_company)
-                print(f"  - Entered Power Company: {power_company}")
-
-                power_meter_input = short_wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//label[text()='Power Meter']/following-sibling::input")))
-                power_meter_input.clear()
-                power_meter_input.send_keys(power_meter)
-                print(f"  - Entered Power Meter: {power_meter}")
-
-                account_number_input = short_wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//label[text()='Account Number']/following-sibling::input")))
-                account_number_input.clear()
-                account_number_input.send_keys(account_number)
-                print(f"  - Entered Account Number: {account_number}")
-
-                print("Data entry complete.")
-
-                save_button = short_wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//button[text()='Save Utility Information']")))
-                # save_button.click() # UNCOMMENT THIS LINE TO ACTUALLY SAVE THE DATA
-                print("✅✅✅ Successfully processed and entered data for Site ID '{site_id}'.")
-                print("NOTE: The 'Save' button click is currently COMMENTED OUT for safety.")
-                print("IOP tab will remain open for the next site.")
-
-            except Exception as e:
-                print(f"❌ An error occurred while processing Site ID '{site_id}': {type(e).__name__} - {e}")
-                print("Saving a screenshot for debugging and moving to the next site...")
-                try:
-                    driver.save_screenshot(f"error_{site_id}.png")
-                except Exception as screenshot_e:
-                    print(f"Could not save screenshot: {screenshot_e}")
-
-                if engie_main_tab_handle in driver.window_handles:
-                    driver.switch_to.window(engie_main_tab_handle)
-                else:
-                    print("Main ENGIE tab was closed. Cannot continue. Please restart.")
-                    raise Exception("Main ENGIE tab was closed, recovery not possible.")
-                continue
-
-    except Exception as e:
-        print(f"\n❌ A FATAL, UNEXPECTED ERROR occurred: {type(e).__name__} - {e}")
-        print(f"A screenshot of the page at the time of the error has been saved to '{SCREENSHOT_FILE}'.")
-        driver.save_screenshot(SCREENSHOT_FILE)
-
-    finally:
-        print("\n--- Automation Complete ---")
-        input("Press Enter to close the script and the browser...")
-        driver.quit()
-
-
-# --- Run the Script ---
-if __name__ == "__main__":
-    run_automation()
+# Entry
+if __name__ == '__main__':
+    sites = load_sites_from_excel(EXCEL_FILE_PATH)
+    auto = EngieIOPAutomator(sites)
+    auto.run()
