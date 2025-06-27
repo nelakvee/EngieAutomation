@@ -1,0 +1,31 @@
+# ── login IOP  (replace the old login_iop with this one) ────────────────────
+def login_iop(self):
+    log.info("Opening IOP in a separate tab …")
+    self.driver.execute_script("window.open('');")
+    self.iop = self.driver.window_handles[-1]
+    self.driver.switch_to.window(self.iop)
+    self.driver.get(IOP_LOGIN_URL)
+
+    # There are two possible screens:  (1) Okta username/pass;  (2) already
+    # authenticated and you land directly on IOP.  We handle both.
+    try:
+        self.waitS.until(
+            EC.visibility_of_element_located((By.ID, 'idToken1'))
+        ).send_keys(IOP_USERNAME)
+        self.driver.find_element(By.ID, 'idToken2').send_keys(IOP_PASSWORD)
+        self.driver.find_element(By.ID, 'loginButton_0').click()
+        log.info("IOP credentials submitted")
+    except TimeoutException:
+        log.info("No Okta login form – using existing SSO session")
+
+    # Wait until the Site/Switch search box is present (dashboard ready)
+    self.waitL.until(
+        EC.visibility_of_element_located(
+            (By.XPATH, "//input[@placeholder='Site/Switch Search']"))
+    )
+    log.info("IOP dashboard ready ✅")
+
+    # ---- MOST IMPORTANT ----
+    # put the focus back on ENGIE before starting the loop
+    self.driver.switch_to.window(self.engie_handle)
+    log.info("Switched back to ENGIE tab to begin site processing")
