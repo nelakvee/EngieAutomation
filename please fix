@@ -1,29 +1,234 @@
-Extracted  5000268425:  {'power_company': '', 'account_number': '12699-67009', 'power_meter': '06715925'}
-2025-06-27 11:21:39 [ERROR] ❌  Error processing 5000268425: Message: 
-Stacktrace:
-	GetHandleVerifier [0x0x10e3b03+62899]
-	GetHandleVerifier [0x0x10e3b44+62964]
-	(No symbol) [0x0xf110f3]
-	(No symbol) [0x0xf5980e]
-	(No symbol) [0x0xf59bab]
-	(No symbol) [0x0xfa25c2]
-	(No symbol) [0x0xf7e554]
-	(No symbol) [0x0xf9fd81]
-	(No symbol) [0x0xf7e306]
-	(No symbol) [0x0xf4d670]
-	(No symbol) [0x0xf4e4e4]
-	GetHandleVerifier [0x0x1344793+2556483]
-	GetHandleVerifier [0x0x133fd02+2537394]
-	GetHandleVerifier [0x0x110a2fa+220586]
-	GetHandleVerifier [0x0x10faae8+157080]
-	GetHandleVerifier [0x0x110141d+184013]
-	GetHandleVerifier [0x0x10eba68+95512]
-	GetHandleVerifier [0x0x10ebc10+95936]
-	GetHandleVerifier [0x0x10d6b5a+9738]
-	BaseThreadInitThunk [0x0x766f7ba9+25]
-	RtlInitializeExceptionChain [0x0x77cdc36b+107]
-	RtlClearBits [0x0x77cdc2ef+191]
+"""
+ENGIE → IOP Utility-Info Sync  (2025-06-27)
+───────────────────────────────────────────────────────────────────────────────
+"""
 
-2025-06-27 11:21:39 [INFO] Saved screenshot → C:\Users\nelakve\PycharmProjects\Engie\screenshots\5000268425_error_20250627_112139.png
-2025-06-27 11:21:39 [INFO] 
-── Site 2/2695  (ID=5000213638) ──
+import os, re, sys, time, logging, openpyxl
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, SessionNotCreatedException
+)
+
+# ─── CONFIG ──────────────────────────────────────────────────────────────────
+EXCEL_FILE_PATH  = r'C:/Users/nelakve/Documents/Field Engineers/Engine_Site_ID_and_Vendor.xlsx'
+
+ENGIE_LOGIN_URL  = 'https://engieimpact.okta.com/'
+ENGIE_APP_TITLE  = 'ENGIE Impact Platform'
+
+IOP_LOGIN_URL    = 'https://iop.vh.vzwnet.com/user/nelakve/sites'
+
+ENGIE_USERNAME   = 'veenith.nelakanti@verizonwireless.com'
+IOP_USERNAME     = 'nelakve'
+IOP_PASSWORD     = 'Vamshin143@'
+
+SHORT_TIMEOUT = 30
+LONG_TIMEOUT  = 90
+
+SCREENSHOT_DIR = os.path.join(os.getcwd(), "screenshots")
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level   = logging.INFO,
+    format  = '%(asctime)s [%(levelname)s] %(message)s',
+    datefmt = '%Y-%m-%d %H:%M:%S',
+    force   = True
+)
+log = logging.getLogger(__name__)
+
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
+def norm(v:str)->str:           # normalize vendor string
+    return re.sub(r'[^a-zA-Z0-9\s]', '', (v or '')).lower().strip()
+
+def shot(driver, site, step):
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(SCREENSHOT_DIR, f"{site}_{step}_{ts}.png")
+    try:
+        driver.save_screenshot(path)
+        log.info(f"📸 {path}")
+    except Exception as e:
+        log.error(f"screenshot failed: {e}")
+
+def load_sites(path):
+    wb = openpyxl.load_workbook(path)
+    rows=[]
+    for sid,v in wb.active.iter_rows(min_row=2,max_col=2,values_only=True):
+        if sid: rows.append((str(sid).strip(), str(v or '').strip()))
+    return rows
+
+# ─── MAIN CLASS ──────────────────────────────────────────────────────────────
+class SyncBot:
+    def __init__(self, sites):
+        self.sites = sites
+        self.driver=None; self.waitS=None; self.waitL=None
+        self.engie=None;  self.iop=None
+
+    # ── setup browser
+    def start(self):
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        opts = webdriver.ChromeOptions(); opts.add_argument('--start-maximized')
+        try:
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()), options=opts)
+        except SessionNotCreatedException as e:
+            log.critical(f"Chrome/driver mismatch: {e}"); sys.exit(1)
+        self.waitS = WebDriverWait(self.driver, SHORT_TIMEOUT)
+        self.waitL = WebDriverWait(self.driver, LONG_TIMEOUT)
+
+    # ── login ENGIE
+    def login_engie(self):
+        self.driver.get(ENGIE_LOGIN_URL)
+        self.waitS.until(EC.visibility_of_element_located((By.ID,'idp-discovery-username'))).send_keys(ENGIE_USERNAME)
+        self.driver.find_element(By.ID,'idp-discovery-submit').click()
+        input("🔑  Complete Okta login/MFA then hit <Enter> …")
+        self.waitL.until(EC.element_to_be_clickable(
+            (By.XPATH,f"//span[@data-se='app-card-title' and @title='{ENGIE_APP_TITLE}']"))).click()
+        self.waitL.until(EC.number_of_windows_to_be(2))
+        self.engie = self.driver.window_handles[-1]
+        self.driver.switch_to.window(self.engie)
+        log.info("ENGIE tab ready")
+
+    # ── login IOP
+    def login_iop(self):
+        self.driver.execute_script("window.open('');")
+        self.iop = self.driver.window_handles[-1]
+        self.driver.switch_to.window(self.iop); self.driver.get(IOP_LOGIN_URL)
+        self.waitS.until(EC.visibility_of_element_located((By.ID,'idToken1'))).send_keys(IOP_USERNAME)
+        self.driver.find_element(By.ID,'idToken2').send_keys(IOP_PASSWORD)
+        self.driver.find_element(By.ID,'loginButton_0').click()
+        log.info("IOP logged in")
+
+    # ------------------------------------------------------------------------
+    # Extract vendor, acct, meter for ONE site
+    # ------------------------------------------------------------------------
+    def grab_from_engie(self, site_id, vendor_norm):
+        d=self.driver; wL=self.waitL
+        # overlay gone
+        try: wL.until(EC.invisibility_of_element_located(
+            (By.XPATH,"//div[contains(@class,'ui-widget-overlay')]")))
+        except TimeoutException: pass
+
+        # search
+        sb = wL.until(EC.element_to_be_clickable(
+            (By.XPATH,"//input[contains(@class,'search-box') and @placeholder='Search']")))
+        self.driver.execute_script("arguments[0].value='';", sb); sb.send_keys(site_id)
+        wL.until(EC.element_to_be_clickable(
+            (By.XPATH,"//button[contains(@class,'search-btn-enabled')]"))).click()
+
+        rows_xpath = "//table[contains(@id,'BillResultsGrid')]//tr[.//a[contains(@id,'VendorName')]]"
+        wL.until(EC.presence_of_element_located((By.XPATH,rows_xpath)))
+        for row in d.find_elements(By.XPATH, rows_xpath):
+            if vendor_norm and vendor_norm not in norm(row.find_element(
+                    By.XPATH,".//a[contains(@id,'VendorName')]").text):
+                continue
+            before=set(d.window_handles)
+            row.find_element(By.XPATH,".//a[normalize-space()='View...']").click()
+            wL.until(EC.new_window_is_opened(before))
+            new = (set(d.window_handles)-before).pop()
+
+            # close old tab
+            d.switch_to.window(self.engie); d.close()
+            d.switch_to.window(new); self.engie=new
+
+            # vendor / acct / meter – probe all frames
+            fields = {}
+            def try_extract():
+                fields['account'] = d.find_element(By.ID,'id-uem-bill-details-acct-number').text.strip()
+                fields['meter']   = d.find_element(
+                    By.XPATH,"//td[contains(@class,'uem-bill-details-meter-number-widthSet')]").text.strip()
+                fields['vendor']  = d.find_element(
+                    By.ID,'id-uem-bill-details-vendor-name').text.split('/')[0].strip()
+            try:
+                wL.until(EC.presence_of_element_located((By.ID,'id-uem-bill-details-acct-number')))
+                try_extract()
+            except Exception:
+                # iterate frames
+                for fr in d.find_elements(By.TAG_NAME,'iframe'):
+                    d.switch_to.frame(fr)
+                    try:
+                        try_extract(); break
+                    except Exception: d.switch_to.parent_frame()
+            # fallback vendor (table label)
+            if not fields.get('vendor'):
+                try:
+                    lbl = d.find_element(By.XPATH,
+                        "//th[normalize-space()='Vendor Name']/following-sibling::td").text
+                    fields['vendor']=lbl.split('/')[0].strip()
+                except NoSuchElementException: pass
+            d.switch_to.default_content()
+            return fields
+        return {}
+
+    # ------------------------------------------------------------------------
+    # Update IOP for one site
+    # ------------------------------------------------------------------------
+    def push_to_iop(self, site_id, data):
+        d=self.driver; wS=self.waitS; wL=self.waitL
+        d.switch_to.window(self.iop)
+        # search site
+        box=wL.until(EC.element_to_be_clickable((By.XPATH,"//input[@placeholder='Site/Switch Search']")))
+        box.clear(); box.send_keys(site_id); time.sleep(1)
+        wS.until(EC.element_to_be_clickable((By.XPATH,"//a[@class='dropdown-item']"))).click()
+        # expand Utility Info panel
+        header = wL.until(EC.element_to_be_clickable((By.XPATH,"//span[normalize-space()='Utility Info']/..")))
+        d.execute_script("arguments[0].scrollIntoView({block:'center'});",header); header.click()
+
+        # wait for Power Company input inside panel (not the readonly table row)
+        try:
+            wL.until(EC.visibility_of_element_located((
+                By.XPATH,"//div[contains(@class,'row')]//label[.='Power Company']/following-sibling::input")))
+        except TimeoutException:
+            # click arrow icon if present then wait again
+            try: header.find_element(By.TAG_NAME,'img').click()
+            except Exception: pass
+            wL.until(EC.visibility_of_element_located((
+                By.XPATH,"//div[contains(@class,'row')]//label[.='Power Company']/following-sibling::input")))
+
+        mapping = {
+            'Power Company': ("//label[.='Power Company']/following-sibling::input", data['vendor']),
+            'Power Meter'  : ("//label[.='Power Meter']/following-sibling::input",   data['meter']),
+            'Account Number':("//label[.='Account Number']/following-sibling::input",data['account'])
+        }
+        for label,(xp,val) in mapping.items():
+            inp = wS.until(EC.element_to_be_clickable((By.XPATH,xp)))
+            inp.clear(); inp.send_keys(val)
+            log.info(f"🖊 {label}: {val}")
+
+        wS.until(EC.element_to_be_clickable(
+            (By.XPATH,"//button[normalize-space()='Save Utility Information']"))).click()
+        log.info("Utility Info saved ✔")
+        time.sleep(2)
+
+    # ------------------------------------------------------------------------
+    def handle_site(self, idx, site_id, vendor):
+        log.info(f"\n── {idx}/{len(self.sites)} SiteID={site_id} ──")
+        try:
+            data = self.grab_from_engie(site_id, norm(vendor))
+            if not data:
+                log.warning("No matching vendor / data not found – skipping")
+                return
+            log.info(f"Extracted ⇒ {data}")
+            self.push_to_iop(site_id, data)
+        except Exception as e:
+            log.error(f"❌  {site_id}: {e}")
+            shot(self.driver, site_id, "fail")
+
+    # ------------------------------------------------------------------------
+    def run(self):
+        self.start()
+        self.login_engie()
+        self.login_iop()
+        for idx,(sid,vn) in enumerate(self.sites,1):
+            self.handle_site(idx,sid,vn)
+        self.driver.quit(); log.info("All done.")
+
+# ─── SCRIPT ENTRY ────────────────────────────────────────────────────────────
+if __name__=="__main__":
+    print("=== ENGIE → IOP automation ===")
+    sites = load_sites(EXCEL_FILE_PATH)
+    print(f"Rows loaded: {len(sites)}")
+    if not sites: sys.exit("No sites found – check spreadsheet.")
+    SyncBot(sites).run()
