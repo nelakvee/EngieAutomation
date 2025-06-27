@@ -1,0 +1,29 @@
+Extracted  5000268425:  {'power_company': '', 'account_number': '12699-67009', 'power_meter': '06715925'}
+2025-06-27 11:21:39 [ERROR] ❌  Error processing 5000268425: Message: 
+Stacktrace:
+	GetHandleVerifier [0x0x10e3b03+62899]
+	GetHandleVerifier [0x0x10e3b44+62964]
+	(No symbol) [0x0xf110f3]
+	(No symbol) [0x0xf5980e]
+	(No symbol) [0x0xf59bab]
+	(No symbol) [0x0xfa25c2]
+	(No symbol) [0x0xf7e554]
+	(No symbol) [0x0xf9fd81]
+	(No symbol) [0x0xf7e306]
+	(No symbol) [0x0xf4d670]
+	(No symbol) [0x0xf4e4e4]
+	GetHandleVerifier [0x0x1344793+2556483]
+	GetHandleVerifier [0x0x133fd02+2537394]
+	GetHandleVerifier [0x0x110a2fa+220586]
+	GetHandleVerifier [0x0x10faae8+157080]
+	GetHandleVerifier [0x0x110141d+184013]
+	GetHandleVerifier [0x0x10eba68+95512]
+	GetHandleVerifier [0x0x10ebc10+95936]
+	GetHandleVerifier [0x0x10d6b5a+9738]
+	BaseThreadInitThunk [0x0x766f7ba9+25]
+	RtlInitializeExceptionChain [0x0x77cdc36b+107]
+	RtlClearBits [0x0x77cdc2ef+191]
+
+2025-06-27 11:21:39 [INFO] Saved screenshot → C:\Users\nelakve\PycharmProjects\Engie\screenshots\5000268425_error_20250627_112139.png
+2025-06-27 11:21:39 [INFO] 
+── Site 2/2695  (ID=5000213638) ──
